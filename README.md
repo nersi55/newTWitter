@@ -225,3 +225,51 @@ MIT
 ---
 
 If you want, I can also add example `.env` handling, a stronger README section on writing safe cookie exports, or create a small `package.json` script to start the server.
+
+## Telegram failure reporting
+
+You can configure the server to send failure notifications to Telegram using a bot. Recommended steps:
+
+- Create a bot and obtain its token (you already have one).
+- Ask the target user to start the bot so the bot can message them and you can obtain their chat id.
+- Set environment variables before running the server:
+
+```bash
+export TELEGRAM_BOT_TOKEN="<your-bot-token>"
+# numeric chat id (preferred) or username (less reliable)
+export TELEGRAM_CHAT_ID="<numeric-chat-id>"
+# optional: export TELEGRAM_CHAT_USERNAME='@nersi55'
+```
+
+If `TELEGRAM_CHAT_ID` is not provided the server will try to auto-discover a recent chat id via `getUpdates` (the user must have messaged the bot at least once). When a failure occurs the server sends a short message with error summary and stack snippet.
+
+If you want, I can add a small script to fetch your chat id automatically using `getUpdates` and print it for you.
+
+## .env sample
+
+You can place environment variables in a file named `.env` in the project root to avoid exporting them every session. Do NOT commit secrets to public repos.
+
+Sample `.env` (replace values):
+
+```env
+# Telegram bot token (from BotFather)
+TELEGRAM_BOT_TOKEN=8155247414:AAEjmD1PLUoy4fO5ouQsXuaIHDy1rb97yAE
+
+# Preferred: numeric chat id discovered via get_telegram_chat_id.js
+TELEGRAM_CHAT_ID=123456789
+
+# Optional: username (less reliable than numeric chat id)
+TELEGRAM_CHAT_USERNAME=@nersi55
+
+# How long to keep the browser alive (ms). 0 disables keep-alive.
+KEEP_ALIVE_MS=60000
+
+# Server port
+PORT=3000
+```
+
+After creating `.env`, install `dotenv` (optional) so the server picks it up automatically:
+
+```bash
+npm install dotenv
+```

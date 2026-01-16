@@ -1,10 +1,90 @@
 // 1. Import necessary modules
 // 1. وارد کردن ماژول‌های ضروری
 //https://g.co/gemini/share/13b9a7fce227
+// Load .env if present (optional; install dotenv to use)
+try { require('dotenv').config(); } catch (e) { /* dotenv not installed or .env not present */ }
 const { chromium } = require('playwright');
 const path = require('path');
 const fsp = require('fs').promises; // Use promise-based fs for async operations
 const express = require('express');
+const os = require('os');
+
+// --- Telegram helper ---
+// Configure via env vars:
+// TELEGRAM_BOT_TOKEN (required) and TELEGRAM_CHAT_ID (optional - numeric chat id). If TELEGRAM_CHAT_ID is not set,
+// you can set TELEGRAM_CHAT_USERNAME to a username like '@nersi55' but note bots cannot always message users by username.
+// Preferred: set TELEGRAM_CHAT_ID to the numeric chat id after the user starts the bot.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || null;
+const TELEGRAM_CHAT_USERNAME = process.env.TELEGRAM_CHAT_USERNAME || null;
+
+async function sendTelegramMessage(target, text) {
+  try {
+    if (!TELEGRAM_BOT_TOKEN) {
+      console.log('Telegram token not set; skipping sendTelegramMessage.');
+      return;
+    }
+    const api = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    const body = { chat_id: target, text };
+    // use global fetch (node 18+) or fallback to require('node-fetch')
+    const fetchFn = (typeof fetch === 'function') ? fetch : (await import('node-fetch')).default;
+    const res = await fetchFn(api, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.error('Telegram send failed:', res.status, txt);
+    }
+  } catch (e) {
+    console.error('sendTelegramMessage error:', e && e.message ? e.message : e);
+  }
+}
+
+async function reportFailure(err, context) {
+  try {
+    const host = os.hostname();
+    const time = new Date().toISOString();
+    const errMsg = err && err.message ? err.message : String(err);
+    const stack = err && err.stack ? '\n' + err.stack.split('\n').slice(0,5).join('\n') : '';
+    const text = `*Failure on* ${host}\n*Context:* ${context}\n*Time:* ${time}\n*Error:* ${errMsg}${stack}`;
+
+    // Try numeric chat id first, then username if provided
+    if (TELEGRAM_CHAT_ID) {
+      sendTelegramMessage(TELEGRAM_CHAT_ID, text).catch(() => {});
+    } else if (TELEGRAM_CHAT_USERNAME) {
+      sendTelegramMessage(TELEGRAM_CHAT_USERNAME, text).catch(() => {});
+    } else {
+      // Attempt to discover recent chat from getUpdates (requires bot to have received a message from the user)
+      if (!TELEGRAM_BOT_TOKEN) return;
+      try {
+        const updApi = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates`;
+        const fetchFn = (typeof fetch === 'function') ? fetch : (await import('node-fetch')).default;
+        const r = await fetchFn(updApi);
+        const j = await r.json().catch(() => ({}));
+        if (j && Array.isArray(j.result) && j.result.length) {
+          // find first message from a chat whose username matches TELEGRAM_CHAT_USERNAME if set
+          let chatId = null;
+          for (let u of j.result.reverse()) {
+            const msg = u.message || u.channel_post || u.edited_message;
+            if (!msg || !msg.from) continue;
+            if (TELEGRAM_CHAT_USERNAME) {
+              if ((msg.from.username && ('@' + msg.from.username) === TELEGRAM_CHAT_USERNAME) || (msg.chat && msg.chat.username && ('@' + msg.chat.username) === TELEGRAM_CHAT_USERNAME)) {
+                chatId = msg.chat && msg.chat.id ? msg.chat.id : (msg.from && msg.from.id ? msg.from.id : null);
+                break;
+              }
+            } else {
+              chatId = msg.chat && msg.chat.id ? msg.chat.id : (msg.from && msg.from.id ? msg.from.id : null);
+              if (chatId) break;
+            }
+          }
+          if (chatId) sendTelegramMessage(chatId, text).catch(() => {});
+        }
+      } catch (e) {
+        console.error('Failed to auto-discover Telegram chat id:', e && e.message ? e.message : e);
+      }
+    }
+  } catch (e) {
+    console.error('reportFailure failed:', e && e.message ? e.message : e);
+  }
+}
 
 // Helper function for random delays
 // تابع کمکی برای ایجاد تاخیر تصادفی
@@ -124,6 +204,7 @@ async function runXLoginAndPost(tweetContent) {
         console.log(`Cookies added (${normalized.length}).`);
       } catch (addErr) {
         console.error('Error adding cookies (first attempt):', addErr && (addErr.message || addErr));
+        try { reportFailure(addErr, 'addCookies - first attempt (runXLoginAndPost)'); } catch (e) {}
         // Fallback: try adding cookies with only minimal fields (name, value, domain/path)
         const minimal = normalized.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path || '/', url: c.url })).filter(Boolean);
         try {
@@ -131,12 +212,14 @@ async function runXLoginAndPost(tweetContent) {
           console.log(`Cookies added (fallback, ${minimal.length}).`);
         } catch (fallbackErr) {
           console.error('Fallback cookie add also failed:', fallbackErr && (fallbackErr.message || fallbackErr));
+          try { reportFailure(fallbackErr, 'addCookies - fallback (runXLoginAndPost)'); } catch (e) {}
           // Continue without cookies rather than throwing to allow the rest of the flow to run
           console.log('Continuing without cookies.');
         }
       }
     } catch (err) {
       console.error(`Error reading/parsing cookies file (${cookiesPath}):`, err && err.message ? err.message : err);
+      try { reportFailure(err, `Error reading/parsing cookies file (${cookiesPath})`); } catch (e) {}
       console.log('Proceeding without cookies.');
     }
 
@@ -240,6 +323,7 @@ async function runXLoginAndPost(tweetContent) {
 
   } catch (error) {
     console.error("\nAn error occurred during the Playwright process:", error);
+    try { reportFailure(error, 'runXLoginAndPost'); } catch (e) { /* ignore */ }
     if (page) {
       const screenshotPath = path.join(__dirname, `error_screenshot_${Date.now()}.png`);
       try {
@@ -354,10 +438,12 @@ async function runReadTimeline(count) {
         try {
           await context.addCookies(minimal);
         } catch (e) {
+          try { reportFailure(e, 'addCookies - fallback (runReadTimeline)'); } catch (r) {}
           // continue without cookies
         }
       }
     } catch (err) {
+      try { reportFailure(err, `Error reading/parsing cookies file (${cookiesPath}) - runReadTimeline`); } catch (r) {}
       // ignore - proceed without cookies
     }
 
@@ -461,6 +547,7 @@ async function runReadTimeline(count) {
     return result;
 
   } catch (error) {
+    try { reportFailure(error, 'runReadTimeline'); } catch (e) { /* ignore */ }
     return { success: false, message: error && error.message ? error.message : String(error) };
   } finally {
     // If KEEP_ALIVE_MS is set to >0 we let the background task close the browser.
