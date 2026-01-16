@@ -116,12 +116,99 @@ lsof -i :3000
 kill <PID>
 ```
 
+## Read Timeline Endpoint
+
+This server exposes a simple read-only endpoint to fetch the top N posts from the authenticated home timeline.
+
+- GET by path: `GET /readTM/:count` — example: `GET /readTM/3` returns the top 3 posts.
+- GET by query: `GET /readTM?count=3` — same as above.
+- Typo alias: `GET /reamTM/:count` — convenience alias for `readTM`.
+
+Response (JSON) example:
+
+```json
+{
+  "success": true,
+  "count": 3,
+  "tweets": [
+    {
+      "text": "...",
+      "time": "2024-12-01T12:34:56.000Z",
+      "author": "Fox News",
+      "handle": "/FoxNews",
+      "postUrl": "https://x.com/FoxNews/status/2011948651854045272",
+      "replies": 12,
+      "retweets": 34,
+      "likes": 256
+    }
+  ]
+}
+```
+
+Notes:
+- Fields may be empty if Playwright cannot find the corresponding DOM elements for a given post (X markup changes frequently).
+- If you get partial or zero results, run the server with `KEEP_ALIVE_MS` set (see below) so the automation has extra time to load dynamic content and the background browsing keeps the session active.
+
+## Keep-alive / Human-like browsing
+
+The automation can optionally keep the browser open after completing a request to simulate natural browsing behavior. Control the behavior with the `KEEP_ALIVE_MS` environment variable (milliseconds):
+
+- Default: `KEEP_ALIVE_MS` = `60000` (1 minute). The server will start a background human-like browsing simulation and return responses immediately.
+- Disable keep-alive: set `KEEP_ALIVE_MS=0` (the browser/context/page will be closed immediately after the request finishes).
+
+Example run (keep browser alive 90s):
+
+```bash
+export KEEP_ALIVE_MS=90000
+node app.js
+curl http://127.0.0.1:3000/readTM/3
+```
+
+The background simulation performs randomized scrolling, hovering, and occasional intra-site clicks to emulate human behavior; it automatically closes the page/context/browser when finished.
+
 ---
 
 ## Development notes
 - Main automation lives in `app.js` inside function `runXLoginAndPost(tweetContent)`.
 - The server exposes `POST /tweet` which expects JSON `{ "tweetText": "your message" }`.
 - The code includes logic to normalize cookies and to fall back to a minimal cookie set if Playwright's `addCookies()` fails.
+
+## Reply endpoints
+
+This version adds endpoints to post replies to specific X posts (statuses).
+
+- `POST /reply` — JSON body. Accepts `postUrl` or `postId` (or `target`) and the reply text under the key `Replay-tweetText` (or `replyText`). Example body:
+
+```json
+{ "postId": "2011913540647477469", "Replay-tweetText": "Nice post!" }
+```
+
+- `POST /replay:<target>` — Path-style route. The `<target>` can be a full URL or numeric id. Example:
+
+```
+POST http://127.0.0.1:3000/replay:https://x.com/FoxNews/status/2011913540647477469
+```
+
+Example curl (POST /reply with postId):
+
+```bash
+curl -X POST http://127.0.0.1:3000/reply \
+  -H "Content-Type: application/json" \
+  -d '{"postId":"2011913540647477469","Replay-tweetText":"nice"}'
+```
+
+Example curl (path-style):
+
+```bash
+curl -X POST 'http://127.0.0.1:3000/replay:https://x.com/FoxNews/status/2011913540647477469' \
+  -H "Content-Type: application/json" \
+  -d '{"Replay-tweetText":"nice"}'
+```
+
+Notes:
+- The server uses the same `cookies.json` session to authenticate; ensure it contains a valid logged-in X session.
+- Reply UI on X changes frequently; if replies fail, the server will save a debug screenshot `reply_debug_*.png` in the project root for inspection.
+- JSON must be valid (double quotes) and include `Content-Type: application/json` header.
 
 ---
 

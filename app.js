@@ -216,8 +216,27 @@ async function runXLoginAndPost(tweetContent) {
     console.log("Tweet posted (or attempt initiated). Waiting...");
     await page.waitForTimeout(randomDelay(7000, 10000));
 
+    const result = { success: true, message: "Tweet posted successfully (or attempt initiated)." };
+
+    // Keep browsing after posting if KEEP_ALIVE_MS > 0 (background)
+    const keepAliveMs = process.env.KEEP_ALIVE_MS ? Number(process.env.KEEP_ALIVE_MS) : 60000;
+    if (keepAliveMs > 0) {
+      (async () => {
+        try {
+          await simulateHumanBrowsing(page, keepAliveMs);
+        } catch (e) {
+          console.error('Background browsing error (post):', e && e.message ? e.message : e);
+        } finally {
+          try { await page.close(); } catch (e) {}
+          try { await context.close(); } catch (e) {}
+          try { await browser.close(); } catch (e) {}
+        }
+      })();
+      return result;
+    }
+
     console.log("--- Playwright task completed successfully. ---");
-    return { success: true, message: "Tweet posted successfully (or attempt initiated)." };
+    return result;
 
   } catch (error) {
     console.error("\nAn error occurred during the Playwright process:", error);
@@ -264,7 +283,451 @@ async function runXLoginAndPost(tweetContent) {
   }
 }
 
+// Read top N posts from the home timeline and return structured info
+async function runReadTimeline(count) {
+  let browser;
+  let context;
+  let page;
+  const n = Number(count) || 1;
+  if (n <= 0) return { success: false, message: 'Count must be >= 1' };
+
+  const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+
+  // How long to keep browsing after completing primary task (ms).
+  // Set via env `KEEP_ALIVE_MS`. If 0 or unset, default to 60000 (1 minute).
+  const keepAliveMs = process.env.KEEP_ALIVE_MS ? Number(process.env.KEEP_ALIVE_MS) : 60000;
+
+  try {
+    browser = await chromium.launch({
+      executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      headless: false,
+      args: ['--no-sandbox','--disable-gpu']
+    });
+
+    context = await browser.newContext({ userAgent: randomUserAgent, locale: 'en-US' });
+
+    // Load cookies (reuse normalization logic from above)
+    const cookiesPath = path.join(__dirname, 'cookies.json');
+    try {
+      const cookiesString = await fsp.readFile(cookiesPath, 'utf-8');
+      let cookies = JSON.parse(cookiesString);
+      const normalizeSameSite = (v) => {
+        if (!v && v !== 0) return undefined;
+        const s = String(v).toLowerCase();
+        if (s === 'strict') return 'Strict';
+        if (s === 'lax') return 'Lax';
+        if (s === 'none' || s === 'no_restriction') return 'None';
+        if (s === '0') return 'None';
+        if (s === '1') return 'Lax';
+        if (s === '2') return 'Strict';
+        return undefined;
+      };
+
+      const normalized = (Array.isArray(cookies) ? cookies : []).map((c) => {
+        const cc = Object.assign({}, c);
+        if (cc.expiry && !cc.expires) {
+          const num = Number(cc.expiry);
+          if (!Number.isNaN(num)) cc.expires = Math.floor(num);
+          delete cc.expiry;
+        }
+        if (cc.expirationDate && !cc.expires) {
+          const num = Number(cc.expirationDate);
+          if (!Number.isNaN(num)) cc.expires = Math.floor(num);
+          delete cc.expirationDate;
+        }
+        if (cc.expires) {
+          const num = Number(cc.expires);
+          if (Number.isFinite(num)) cc.expires = Math.floor(num);
+          else delete cc.expires;
+        }
+        const ss = normalizeSameSite(cc.sameSite || cc.SameSite || cc.same_site);
+        if (ss) cc.sameSite = ss;
+        else delete cc.sameSite;
+        if (!cc.url && !cc.domain) return null;
+        return cc;
+      }).filter(Boolean);
+
+      try {
+        await context.addCookies(normalized);
+      } catch (addErr) {
+        const minimal = normalized.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path || '/', url: c.url })).filter(Boolean);
+        try {
+          await context.addCookies(minimal);
+        } catch (e) {
+          // continue without cookies
+        }
+      }
+    } catch (err) {
+      // ignore - proceed without cookies
+    }
+
+    page = await context.newPage();
+    await page.setViewportSize({ width: 1200, height: 900 });
+
+    await page.goto('https://x.com/home', { waitUntil: 'load', timeout: 120000 });
+    await page.waitForTimeout(1500 + Math.random() * 1500);
+
+    // Scroll a little to ensure feed items load
+    await page.evaluate(() => window.scrollBy(0, 400));
+    await page.waitForTimeout(1000 + Math.random() * 1000);
+
+    // Extract top N articles with URL and numeric metrics
+    const tweets = await page.$$eval('article', (articles, limit) => {
+      const results = [];
+      const parseNumber = (s) => {
+        if (!s) return 0;
+        // sometimes innerText or aria-label contains words; extract first number
+        const cleaned = String(s).replace(/[,\s]+/g, '');
+        const m = cleaned.match(/\d+/);
+        return m ? Number(m[0]) : 0;
+      };
+
+      for (let i = 0; i < articles.length && results.length < limit; i++) {
+        const a = articles[i];
+        const textEl = a.querySelector('div[data-testid="tweetText"]') || a.querySelector('[lang]');
+        const text = textEl ? textEl.innerText.trim() : '';
+        const timeEl = a.querySelector('time');
+        const time = timeEl ? timeEl.getAttribute('datetime') : null;
+
+        // Post URL (find anchor that links to the status)
+        let postUrl = null;
+        const statusAnchor = a.querySelector('a[href*="/status/"]');
+        if (statusAnchor) {
+          const href = statusAnchor.getAttribute('href') || '';
+          postUrl = href.startsWith('http') ? href : (`https://x.com${href}`);
+        }
+
+        // Author name and handle
+        let author = '';
+        let handle = '';
+        try {
+          const anchors = Array.from(a.querySelectorAll('a[href]'));
+          const profileAnchor = anchors.find(el => {
+            const h = el.getAttribute('href') || '';
+            // prefer simple profile paths like "/FoxNews" (single path segment)
+            if (!h.startsWith('/')) return false;
+            if (h.includes('/status') || h.includes('/hashtag') || h.includes('/i/')) return false;
+            const parts = h.split('/').filter(Boolean);
+            return parts.length === 1;
+          });
+          if (profileAnchor) {
+            handle = profileAnchor.getAttribute('href') || '';
+            author = (profileAnchor.innerText || '').trim();
+          }
+        } catch (e) {}
+
+        // Metrics: replies, retweets, likes
+        let replies = 0, retweets = 0, likes = 0;
+        try {
+          // look for elements with data-testid or aria-labels containing metrics
+          const replyEl = a.querySelector('[data-testid*="reply"]') || a.querySelector('[aria-label*="reply"]');
+          const retweetEl = a.querySelector('[data-testid*="retweet"]') || a.querySelector('[aria-label*="retweet"]');
+          const likeEl = a.querySelector('[data-testid*="like"]') || a.querySelector('[aria-label*="like"]');
+
+          const candidateText = (el) => {
+            if (!el) return '';
+            return (el.innerText || el.getAttribute('aria-label') || '').trim();
+          };
+
+          replies = parseNumber(candidateText(replyEl));
+          retweets = parseNumber(candidateText(retweetEl));
+          likes = parseNumber(candidateText(likeEl));
+        } catch (e) {}
+
+        results.push({ text, time, author, handle, postUrl, replies, retweets, likes });
+      }
+      return results;
+    }, n);
+
+    const result = { success: true, count: tweets.length, tweets };
+
+    // If keepAliveMs > 0, run background human-like browsing without blocking response.
+    if (keepAliveMs > 0) {
+      (async () => {
+        try {
+          await simulateHumanBrowsing(page, keepAliveMs);
+        } catch (e) {
+          console.error('Background browsing error (readTimeline):', e && e.message ? e.message : e);
+        } finally {
+          try { await page.close(); } catch (e) {}
+          try { await context.close(); } catch (e) {}
+          try { await browser.close(); } catch (e) {}
+        }
+      })();
+      // return response immediately while browsing continues
+      return result;
+    }
+
+    return result;
+
+  } catch (error) {
+    return { success: false, message: error && error.message ? error.message : String(error) };
+  } finally {
+    // If KEEP_ALIVE_MS is set to >0 we let the background task close the browser.
+    const keepAliveMsFinal = process.env.KEEP_ALIVE_MS ? Number(process.env.KEEP_ALIVE_MS) : 60000;
+    if (keepAliveMsFinal <= 0) {
+      try { if (page) await page.close(); } catch (e) {}
+      try { if (context) await context.close(); } catch (e) {}
+      try { if (browser) await browser.close(); } catch (e) {}
+    } else {
+      // do not close here; background task will handle closure
+    }
+  }
+}
+
+// Simulate human-like browsing on a page for `durationMs` milliseconds.
+async function simulateHumanBrowsing(page, durationMs) {
+  const end = Date.now() + durationMs;
+  let pageUrl = '';
+  try { pageUrl = page.url(); } catch (e) { pageUrl = ''; }
+  console.log(`Simulating human browsing on ${pageUrl} for ${Math.round(durationMs/1000)}s`);
+
+  function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+  while (Date.now() < end) {
+    try {
+      // Random scroll
+      const dy = rand(100, 800) * (Math.random() < 0.6 ? 1 : -1);
+      await page.evaluate((y) => window.scrollBy({ top: y, left: 0, behavior: 'smooth' }), dy);
+      await page.waitForTimeout(rand(800, 2500));
+
+      // Randomly hover over some elements
+      const anchors = await page.$$('a[href]');
+      if (anchors.length > 0 && Math.random() < 0.4) {
+        const idx = rand(0, Math.min(anchors.length - 1, 8));
+        try { await anchors[idx].hover(); } catch (e) {}
+        await page.waitForTimeout(rand(400, 1200));
+      }
+
+      // Occasionally click into a tweet or profile (but only navigate within x.com)
+      if (Math.random() < 0.25) {
+        try {
+          const statusAnchors = await page.$$('a[href*="/status/"]');
+          if (statusAnchors.length > 0) {
+            const idx = rand(0, Math.min(statusAnchors.length - 1, 4));
+            try { await statusAnchors[idx].click({ button: 'left', delay: rand(50,150) }); } catch (e) {}
+            await page.waitForTimeout(rand(1200, 3500));
+            try { await page.goBack({ timeout: 10000 }); } catch (e) {}
+            await page.waitForTimeout(rand(800, 2000));
+          }
+        } catch (e) {}
+      }
+
+      // Small random pause
+      await page.waitForTimeout(rand(500, 2500));
+    } catch (err) {
+      // ignore per-iteration errors, continue until time elapses
+      console.error('simulateHumanBrowsing iteration error:', err && err.message ? err.message : err);
+      await page.waitForTimeout(1000);
+    }
+  }
+
+  console.log('simulateHumanBrowsing completed.');
+}
+
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Reply helper: navigate to a specific post and reply to it
+// -----------------------------------------------------------------------------
+async function runReplyToPost(target, replyText) {
+  if (!replyText || String(replyText).trim() === '') {
+    return { success: false, message: 'Reply text cannot be empty.' };
+  }
+
+  // Build a usable URL for the target
+  let url = '';
+  if (!target) return { success: false, message: 'Target post is required.' };
+  if (String(target).startsWith('http')) {
+    url = String(target);
+  } else if (/^\d+$/.test(String(target))) {
+    // numeric id -> use the web status viewer
+    url = `https://x.com/i/web/status/${String(target)}`;
+  } else if (String(target).startsWith('/')) {
+    url = `https://x.com${String(target)}`;
+  } else {
+    // fallback: try to interpret as a path
+    url = `https://x.com/${String(target)}`;
+  }
+
+  let browser;
+  let context;
+  let page;
+  try {
+    browser = await chromium.launch({
+      executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      headless: false,
+      args: ['--no-sandbox','--disable-gpu']
+    });
+
+    const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+    context = await browser.newContext({ userAgent: randomUserAgent, locale: 'en-US' });
+
+    // Load cookies like other functions
+    try {
+      const cookiesPath = path.join(__dirname, 'cookies.json');
+      const cookiesString = await fsp.readFile(cookiesPath, 'utf-8');
+      let cookies = JSON.parse(cookiesString || '[]');
+      const normalizeSameSite = (v) => {
+        if (!v && v !== 0) return undefined;
+        const s = String(v).toLowerCase();
+        if (s === 'strict') return 'Strict';
+        if (s === 'lax') return 'Lax';
+        if (s === 'none' || s === 'no_restriction') return 'None';
+        if (s === '0') return 'None';
+        if (s === '1') return 'Lax';
+        if (s === '2') return 'Strict';
+        return undefined;
+      };
+      const normalized = (Array.isArray(cookies) ? cookies : []).map((c) => {
+        const cc = Object.assign({}, c);
+        if (cc.expiry && !cc.expires) {
+          const num = Number(cc.expiry);
+          if (!Number.isNaN(num)) cc.expires = Math.floor(num);
+          delete cc.expiry;
+        }
+        if (cc.expirationDate && !cc.expires) {
+          const num = Number(cc.expirationDate);
+          if (!Number.isNaN(num)) cc.expires = Math.floor(num);
+          delete cc.expirationDate;
+        }
+        if (cc.expires) {
+          const num = Number(cc.expires);
+          if (Number.isFinite(num)) cc.expires = Math.floor(num);
+          else delete cc.expires;
+        }
+        const ss = normalizeSameSite(cc.sameSite || cc.SameSite || cc.same_site);
+        if (ss) cc.sameSite = ss; else delete cc.sameSite;
+        if (!cc.url && !cc.domain) return null;
+        return cc;
+      }).filter(Boolean);
+
+      try { await context.addCookies(normalized); } catch (e) { /* continue without cookies */ }
+    } catch (e) {
+      // ignore cookie loading errors
+    }
+
+    page = await context.newPage();
+    await page.setViewportSize({ width: 1200, height: 900 });
+
+    await page.goto(url, { waitUntil: 'load', timeout: 120000 });
+    await page.waitForTimeout(1500 + Math.random() * 1500);
+
+    // Wait for reply action and open reply composer
+    // Data-testid or aria-labels can vary; try a few selectors
+    const replySelectors = ['[data-testid="reply"]', 'div[aria-label*="Reply"]', 'a[role="button"][href*="/status/"]'];
+    let clicked = false;
+    for (const sel of replySelectors) {
+      try {
+        const el = await page.waitForSelector(sel, { timeout: 5000 });
+        if (el) {
+          await el.click({ force: true });
+          clicked = true;
+          break;
+        }
+      } catch (e) {}
+    }
+
+    if (!clicked) {
+      // Sometimes the reply button is nested in an article; try locating the article then its reply
+      try {
+        const article = await page.$('article');
+        if (article) {
+          const replyBtn = await article.$('[data-testid="reply"]');
+          if (replyBtn) { await replyBtn.click({ force: true }); clicked = true; }
+        }
+      } catch (e) {}
+    }
+
+    // Wait for reply textarea and pick the first visible instance to avoid strict-mode errors
+    const textareaSelector = 'div[data-testid="tweetTextarea_0"]';
+    const textarea = page.locator(textareaSelector).first();
+    await textarea.waitFor({ state: 'visible', timeout: 30000 });
+    await textarea.click({ force: true });
+    await page.waitForTimeout(300 + Math.random() * 700);
+    await textarea.fill('');
+    const typingDelay = Math.random() * 120 + 60;
+    await textarea.type(replyText, { delay: typingDelay, timeout: 60000 });
+
+    // Click Post / Reply button - try dialog-scoped button first, then fallbacks, then keyboard
+    let posted = false;
+    try {
+      const dialog = page.locator('div[role="dialog"]').first();
+      if (await dialog.count() > 0) {
+        const btn = dialog.getByTestId('tweetButtonInline').first();
+        try {
+          await btn.waitFor({ state: 'visible', timeout: 7000 });
+          const ariaDisabled = await btn.getAttribute('aria-disabled');
+          if (ariaDisabled === 'true') await page.waitForTimeout(800);
+          await btn.click({ force: true });
+          posted = true;
+        } catch (e) {
+          // continue to other fallbacks
+        }
+      }
+    } catch (e) {}
+
+    if (!posted) {
+      try {
+        const pageBtn = page.locator('div[role="button"][data-testid*="tweetButton"]').first();
+        await pageBtn.waitFor({ state: 'visible', timeout: 7000 });
+        await pageBtn.click({ force: true });
+        posted = true;
+      } catch (e) {
+        // continue
+      }
+    }
+
+    // Try role/button by accessible name (e.g., 'Reply') as a robust selector
+    if (!posted) {
+      try {
+        const namedBtn = page.getByRole('button', { name: /^(Reply|Send|Tweet)$/i }).first();
+        const count = await namedBtn.count();
+        if (count > 0) {
+          try {
+            await namedBtn.waitFor({ state: 'visible', timeout: 5000 });
+            const ariaDisabled = await namedBtn.getAttribute('aria-disabled');
+            console.log('Named button aria-disabled:', ariaDisabled);
+            await namedBtn.click({ force: true });
+            posted = true;
+          } catch (e) {
+            // continue to keyboard fallback
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Keyboard fallback: try Meta+Enter then Control+Enter to submit when button clicks fail
+    if (!posted) {
+      try { await page.keyboard.press('Meta+Enter'); posted = true; } catch (e) {}
+    }
+    if (!posted) {
+      try { await page.keyboard.press('Control+Enter'); posted = true; } catch (e) {}
+    }
+
+    // If still not posted, capture a diagnostic screenshot and DOM snapshot for debugging
+    if (!posted) {
+      try {
+        const debugPath = path.join(__dirname, `reply_debug_${Date.now()}.png`);
+        await page.screenshot({ path: debugPath, fullPage: true });
+        console.error('Reply send failed; saved screenshot to', debugPath);
+      } catch (e) {
+        console.error('Failed to capture debug screenshot:', e && e.message ? e.message : e);
+      }
+    }
+
+    await page.waitForTimeout(3000 + Math.random() * 4000);
+    return { success: true, message: 'Reply posted (or attempt initiated).', target: url };
+  } catch (err) {
+    return { success: false, message: err && err.message ? err.message : String(err) };
+  } finally {
+    try { if (page) await page.close(); } catch (e) {}
+    try { if (context) await context.close(); } catch (e) {}
+    try { if (browser) await browser.close(); } catch (e) {}
+  }
+}
+
 // Express API Server Setup (No changes here)
 // تنظیمات سرور API اکسپرس (بدون تغییر در اینجا)
 // -----------------------------------------------------------------------------
@@ -297,10 +760,85 @@ app.post('/tweet', async (req, res) => {
   }
 });
 
+// POST /reply - JSON body. Accepts either `postUrl` or `postId` (or `target`) and reply text.
+// Example body: { "postUrl": "https://x.com/FoxNews/status/2011913540647477469", "Replay-tweetText": "nice" }
+app.post('/reply', async (req, res) => {
+  console.log(`Received POST /reply at ${new Date().toISOString()}`);
+  const body = req.body || {};
+  const replyText = body['Replay-tweetText'] || body.ReplayTweetText || body.replyText || body.tweetText;
+  const target = body.postUrl || body.postId || body.target;
+
+  if (!replyText) return res.status(400).json({ success: false, message: "Missing reply text. Use key 'Replay-tweetText' or 'replyText'." });
+  if (!target) return res.status(400).json({ success: false, message: "Missing target post. Provide 'postUrl' or 'postId'." });
+
+  try {
+    const result = await runReplyToPost(target, replyText);
+    if (result && result.success) return res.status(200).json(result);
+    return res.status(500).json(result);
+  } catch (err) {
+    console.error('Error in /reply', err);
+    res.status(500).json({ success: false, message: err && err.message ? err.message : String(err) });
+  }
+});
+
+// Support POST to paths like /replay:https://x.com/... or /replay:2011913540647477469
+app.post(/^\/replay:(.+)/, async (req, res) => {
+  const target = req.params[0];
+  console.log(`Received POST /replay:${target} at ${new Date().toISOString()}`);
+  const body = req.body || {};
+  const replyText = body['Replay-tweetText'] || body.ReplayTweetText || body.replyText || body.tweetText;
+  if (!replyText) return res.status(400).json({ success: false, message: "Missing reply text in JSON body (key 'Replay-tweetText')." });
+
+  try {
+    const result = await runReplyToPost(target, replyText);
+    if (result && result.success) return res.status(200).json(result);
+    return res.status(500).json(result);
+  } catch (err) {
+    console.error('Error in regex /replay route', err);
+    res.status(500).json({ success: false, message: err && err.message ? err.message : String(err) });
+  }
+});
+
 app.get('/', (req, res) => {
     // Updated the welcome message
     // پیام خوش‌آمدگویی به‌روز شد
     res.send('Playwright Tweet API Server is running (V3.2 - Fix type Timeout). Send POST requests to /tweet.');
+});
+
+// Read top N timeline posts
+app.get('/readTM/:count', async (req, res) => {
+  const count = Number(req.params.count) || 0;
+  console.log(`Received request to /readTM/${count}`);
+  if (count <= 0) return res.status(400).json({ success: false, message: 'Invalid count. Use a positive integer.' });
+  try {
+    const result = await runReadTimeline(count);
+    if (result.success) return res.status(200).json(result);
+    return res.status(500).json(result);
+  } catch (err) {
+    console.error('Error in /readTM/:count', err);
+    res.status(500).json({ success: false, message: err && err.message ? err.message : String(err) });
+  }
+});
+
+// Support query param: /readTM?count=3
+app.get('/readTM', async (req, res) => {
+  const count = Number(req.query.count) || 0;
+  console.log(`Received request to /readTM?count=${count}`);
+  if (count <= 0) return res.status(400).json({ success: false, message: 'Invalid or missing count query parameter.' });
+  try {
+    const result = await runReadTimeline(count);
+    if (result.success) return res.status(200).json(result);
+    return res.status(500).json(result);
+  } catch (err) {
+    console.error('Error in /readTM', err);
+    res.status(500).json({ success: false, message: err && err.message ? err.message : String(err) });
+  }
+});
+
+// Typo alias for convenience: /reamTM -> /readTM
+app.get('/reamTM/:count', async (req, res) => {
+  req.url = `/readTM/${req.params.count}`;
+  app._router.handle(req, res);
 });
 
 app.listen(PORT, () => {
