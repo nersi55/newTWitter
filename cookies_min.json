@@ -1,0 +1,117 @@
+[
+  {
+    "name": "auth_token",
+    "value": "37ac22d08828e12116e7fba0d9bc5b9093cb4047",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "None",
+    "secure": true
+  },
+  {
+    "name": "guest_id",
+    "value": "v1%3A176887275428321977",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "None",
+    "secure": true
+  },
+  {
+    "name": "twid",
+    "value": "u%3D1928822920111116288",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "None",
+    "secure": true
+  },
+  {
+    "name": "g_state",
+    "value": "{\"i_l\":0,\"i_ll\":1768872746875,\"i_b\":\"65YJafYo8x1krwmxKA0qq+qgfGCzhFxTF1GvHQIlZa8\",\"i_e\":{\"enable_itp_optimization\":0}}",
+    "url": "https://x.com",
+    "path": "/",
+    "secure": false
+  },
+  {
+    "name": "auth_multi",
+    "value": "\"985603586531975168:2d86e65450074a268d7fffc8984edd4c269a50b1\"",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": true
+  },
+  {
+    "name": "lang",
+    "value": "en",
+    "url": "https://x.com",
+    "path": "/",
+    "secure": false
+  },
+  {
+    "name": "__cf_bm",
+    "value": "x6tRVBGcDTq8N8aR2agtHUXeIcBwJFenmPmTNn3bizA-1768903414.6388962-1.0.1.1-HKYCDf41TtOgO7QAc5g66pLKILf6tsxvKBlJcAd2IcI_YI_.7TFfPUb8UzJ8xqf7bL6trNeGh5Fmouec30jAZNUA4CnSzpE0sI3OPpNJotgY_m4hY.nc6qpmuZNCJhwj",
+    "url": "https://x.com",
+    "path": "/",
+    "secure": true
+  },
+  {
+    "name": "__cuid",
+    "value": "35d4d1c9aa1943abaa85fd32bfda7456",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": false
+  },
+  {
+    "name": "ct0",
+    "value": "7c994ff9933f73535536c3d60ee5abcd9b0b74ec0259bf82e61e17e03b7a6c15d0aa9815b8501250ca54dcc98b89f780d7fa291162a67d586786bf7b573470042c9bc3326016b9282c2094498e670ba0",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "Lax",
+    "secure": true
+  },
+  {
+    "name": "d_prefs",
+    "value": "MToxLGNvbnNlbnRfdmVyc2lvbjoyLHRleHRfdmVyc2lvbjoxMDAw",
+    "url": "https://x.com",
+    "path": "/",
+    "secure": true
+  },
+  {
+    "name": "dnt",
+    "value": "1",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "None",
+    "secure": true
+  },
+  {
+    "name": "guest_id_ads",
+    "value": "v1%3A176156671987015104",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "None",
+    "secure": true
+  },
+  {
+    "name": "guest_id_marketing",
+    "value": "v1%3A176156671987015104",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "None",
+    "secure": true
+  },
+  {
+    "name": "kdt",
+    "value": "Ov8TSRKz1uflzuO75hczfiYCU3FiAlhrCpEzJVs2",
+    "url": "https://x.com",
+    "path": "/",
+    "secure": true
+  },
+  {
+    "name": "personalization_id",
+    "value": "\"v1_duh9IvF0N7vpmk9bMqJ63g==\"",
+    "url": "https://x.com",
+    "path": "/",
+    "sameSite": "None",
+    "secure": true
+  }
+]

@@ -81,12 +81,16 @@ Successful response example:
 
 ## Test helpers
 - `test_add_cookies.js` — small script that normalizes `cookies.json` and attempts to `context.addCookies()` with system Chrome to verify cookies are acceptable.
+- `scripts/minimize_cookies.js` — convenience script that reads `cookies.json` and writes a portable `cookies_min.json` containing only essential fields (name, value, url or domain+path, path, optional `sameSite`, and `secure`). Use this to iteratively find the minimal cookie set required for a logged-in session. **Do not commit** the generated `cookies_min.json` to source control.
 
 Run it with:
 
 ```bash
 node test_add_cookies.js
+node scripts/minimize_cookies.js
 ```
+
+Tip: start with one likely auth cookie (e.g., `auth_token`, `ct0`) in `cookies_min.json` and test endpoints; add cookies incrementally (binary search helps) until authentication succeeds.
 
 ---
 
